@@ -304,7 +304,7 @@ class PDFConverter:
 class PDFConverterApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Image to PDF Converter")
+        self.root.title("Ming - Mass Image to PDF Converter")
         self.root.geometry("520x450")
         self.root.resizable(False, False)
 
