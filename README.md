@@ -5,4 +5,4 @@
 Download and run `.exe` file. Hover to recieve explanations.
 
 # Future of this Project
-Since the scrips solves the problem I had in the most practicable way I can think of, no further developement is planned. However, feel free to make improvements yourself.
+Since the script solves the problem I had in the most practicable way I can think of, no further developement is planned. However, feel free to make improvements yourself.
