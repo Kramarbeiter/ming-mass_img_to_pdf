@@ -4,5 +4,7 @@
 # [Download Executable](https://github.com/Kramarbeiter/ming-mass_img_to_pdf/releases/)
 Download and run `.exe` file. Hover to recieve explanations.
 
+<img width="512" height="480" alt="Ming" src="https://github.com/user-attachments/assets/7e44b99a-ddb5-4585-b687-673bfd85e21b" />
+
 # Future of this Project
 Since the script solves the problem I had in the most practicable way I can think of, no further developement is planned. However, feel free to make improvements yourself.
