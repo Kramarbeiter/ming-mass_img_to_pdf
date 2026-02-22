@@ -8,7 +8,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, Menu
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from PIL import Image
-from fpdf import FPDF  # WICHTIG: 'fpdf2' muss installiert sein
+from fpdf import FPDF
 
 
 def resource_path(relative_path):
@@ -71,66 +71,171 @@ class ToolTip:
 
 
 class PDFConverter:
-    """Core logic for extracting ZIPs and converting images to PDFs."""
+    """Core logic for extracting ZIPs and converting images to PDFs strictly in-memory."""
 
     def __init__(
-        self, input_folder: str, output_folder: str, delete_source: bool = False
+        self, input_path: str, output_folder: str, delete_source: bool = False
     ):
-        self.input_folder = input_folder
-        self.output_folder = output_folder
+        self.input_path = os.path.abspath(input_path)
+        self.output_folder = os.path.abspath(output_folder)
         self.delete_source = delete_source
 
         if not os.path.exists(self.output_folder):
             os.makedirs(self.output_folder)
 
-    def _extract_zip_files(self):
-        print(f"\n🔍 Suche nach ZIP-Dateien in: {self.input_folder}")
-        zip_count = 0
-        for root, _, files in os.walk(self.input_folder):
-            for file in files:
-                if file.lower().endswith(".zip"):
-                    zip_path = os.path.join(root, file)
+    def _get_unique_pdf_path(self, base_name: str) -> str:
+        """Ensures that existing PDFs are not overwritten (appends (1), (2), etc.)."""
+        pdf_name = f"{base_name}.pdf"
+        pdf_path = os.path.abspath(os.path.join(self.output_folder, pdf_name))
+        counter = 1
+
+        while os.path.exists(pdf_path):
+            pdf_name = f"{base_name} ({counter}).pdf"
+            pdf_path = os.path.abspath(os.path.join(self.output_folder, pdf_name))
+            counter += 1
+
+        return pdf_path
+
+    def convert(self):
+        total_pdfs_created = 0
+
+        # CASE 1: The input is directly a single ZIP file
+        if os.path.isfile(self.input_path) and self.input_path.lower().endswith(".zip"):
+            total_pdfs_created += self._create_pdfs_from_zip(self.input_path)
+            return total_pdfs_created
+
+        # CASE 2: The input is a folder (may contain ZIPs and/or images)
+        if os.path.isdir(self.input_path):
+            # 2.1 Search and process ZIP files in the folder
+            for root, _, files in os.walk(self.input_path):
+                for file in files:
+                    if file.lower().endswith(".zip"):
+                        zip_path = os.path.join(root, file)
+                        total_pdfs_created += self._create_pdfs_from_zip(zip_path)
+
+            # 2.2 Process loose images in regular folders
+            folders_with_images = []
+            for root, _, files in os.walk(self.input_path):
+                if any(
+                    f.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp"))
+                    for f in files
+                ):
+                    folders_with_images.append(root)
+
+            for folder in folders_with_images:
+                relative_path = os.path.relpath(folder, self.input_path)
+
+                if relative_path == ".":
+                    safe_pdf_name = os.path.basename(os.path.normpath(self.input_path))
+                else:
+                    safe_pdf_name = relative_path.replace(os.sep, "_")
+
+                if self._create_pdf_from_images(folder, safe_pdf_name):
+                    total_pdfs_created += 1
+
+            # 2.3 SAFE CLEANUP: Delete all empty folders (bottom-up), incl. root folder
+            if self.delete_source:
+                for root, dirs, files in os.walk(self.input_path, topdown=False):
                     try:
-                        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-                            zip_ref.extractall(root)
+                        os.rmdir(
+                            root
+                        )  # Fails automatically and safely if the folder is not empty
+                    except OSError:
+                        pass
 
-                        if self.delete_source:
-                            os.remove(zip_path)
-                            print(f"📦 Entpackt und gelöscht: {file}")
-                        else:
-                            print(f"📦 Entpackt (behalten): {file}")
-                        zip_count += 1
-                    except Exception as e:
-                        print(f"⚠️ Fehler beim Entpacken von {zip_path}: {e}")
+        return total_pdfs_created
 
-    def convert_images_to_pdf(self):
-        self._extract_zip_files()
-        folders_with_images = []
-        for root, _, files in os.walk(self.input_folder):
-            if any(
-                f.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".bmp"))
-                for f in files
-            ):
-                folders_with_images.append(root)
+    def _create_pdfs_from_zip(self, zip_path: str) -> int:
+        """Reads images directly from the ZIP and builds a separate PDF for each virtual folder in the ZIP."""
+        image_extensions = (".png", ".jpg", ".jpeg", ".gif", ".bmp")
+        margin = 10
+        pdfs_created_from_zip = 0
 
-        total_folders = len(folders_with_images)
-        if total_folders == 0:
-            return 0  # Keine Bilder verarbeitet
+        try:
+            with zipfile.ZipFile(zip_path, "r") as z:
+                # Group images by folder structure WITHIN the ZIP
+                images_by_folder = {}
+                for f in z.namelist():
+                    if f.lower().endswith(image_extensions):
+                        dir_name = os.path.dirname(f)
+                        if dir_name not in images_by_folder:
+                            images_by_folder[dir_name] = []
+                        images_by_folder[dir_name].append(f)
 
-        for folder in folders_with_images:
-            relative_path = os.path.relpath(folder, self.input_folder)
+                if not images_by_folder:
+                    return 0
 
-            # Falls der Hauptordner selbst Bilder enthält, benennen wir das PDF nach dem Ordnernamen
-            if relative_path == ".":
-                safe_pdf_name = os.path.basename(os.path.normpath(self.input_folder))
-            else:
-                safe_pdf_name = relative_path.replace(os.sep, "_")
+                zip_base_name = os.path.splitext(os.path.basename(zip_path))[0]
 
-            self._create_pdf_from_images(folder, safe_pdf_name)
+                # Create a separate PDF for each subfolder in the ZIP
+                for dir_name, image_files in images_by_folder.items():
+                    pdf = FPDF()
+                    image_files.sort()
 
-        return total_folders
+                    if dir_name == "":
+                        safe_pdf_name = zip_base_name
+                    else:
+                        safe_pdf_name = f"{zip_base_name}_{dir_name.replace('/', '_').replace(os.sep, '_')}"
 
-    def _create_pdf_from_images(self, subfolder_path: str, pdf_name: str):
+                    processed_any = False
+                    for img_name in image_files:
+                        try:
+                            with z.open(img_name) as img_file:
+                                image = Image.open(img_file)
+                                if image.mode != "RGB":
+                                    image = image.convert("RGB")
+
+                                img_w, img_h = image.size
+                                orientation = "L" if img_w > img_h else "P"
+                                pdf.add_page(orientation=orientation)
+
+                                max_w = pdf.w - 2 * margin
+                                max_h = pdf.h - 2 * margin
+
+                                ratio = min(max_w / img_w, max_h / img_h)
+                                new_w = img_w * ratio
+                                new_h = img_h * ratio
+
+                                x_pos = (pdf.w - new_w) / 2
+                                y_pos = (pdf.h - new_h) / 2
+
+                                img_byte_arr = io.BytesIO()
+                                image.save(img_byte_arr, format="JPEG")
+
+                                pdf.image(
+                                    img_byte_arr, x=x_pos, y=y_pos, w=new_w, h=new_h
+                                )
+                                processed_any = True
+                        except Exception as e:
+                            print(
+                                f"Error processing image {img_name} in ZIP {zip_path}: {e}"
+                            )
+
+                    if processed_any:
+                        # Apply anti-overwrite logic here
+                        pdf_output_path = self._get_unique_pdf_path(safe_pdf_name)
+
+                        try:
+                            pdf.output(pdf_output_path)
+                            pdfs_created_from_zip += 1
+                        except Exception as e:
+                            print(f"Error saving PDF '{safe_pdf_name}': {e}")
+
+        except Exception as e:
+            print(f"Error reading ZIP {zip_path}: {e}")
+            return 0
+
+        # Delete ZIP file if requested
+        if self.delete_source:
+            try:
+                os.remove(zip_path)
+            except Exception:
+                pass
+
+        return pdfs_created_from_zip
+
+    def _create_pdf_from_images(self, subfolder_path: str, pdf_name: str) -> bool:
+        """Reads loose images from a regular folder and builds the PDF."""
         pdf = FPDF()
         image_extensions = (".png", ".jpg", ".jpeg", ".gif", ".bmp")
         image_files = sorted(
@@ -142,6 +247,9 @@ class PDFConverter:
         )
         processed_images = []
 
+        if not image_files:
+            return False
+
         margin = 10
 
         for image_file in image_files:
@@ -152,21 +260,12 @@ class PDFConverter:
                     image = image.convert("RGB")
 
                 img_w, img_h = image.size
-
-                # Dynamische Seitenausrichtung
-                if img_w > img_h:
-                    orientation = "L"  # Landscape
-                else:
-                    orientation = "P"  # Portrait
-
-                # Seite mit der exakt passenden Ausrichtung hinzufügen
+                orientation = "L" if img_w > img_h else "P"
                 pdf.add_page(orientation=orientation)
 
-                # Maximalen Platz berechnen (passt sich der Ausrichtung automatisch an)
                 max_w = pdf.w - 2 * margin
                 max_h = pdf.h - 2 * margin
 
-                # Skalierung und Zentrierung berechnen
                 ratio = min(max_w / img_w, max_h / img_h)
                 new_w = img_w * ratio
                 new_h = img_h * ratio
@@ -180,35 +279,33 @@ class PDFConverter:
                 pdf.image(img_byte_arr, x=x_pos, y=y_pos, w=new_w, h=new_h)
                 processed_images.append(image_path)
             except Exception as e:
-                print(f"⚠️ Fehler bei {image_file}: {e}")
+                print(f"Error processing {image_file}: {e}")
 
-        # PDF speichern
-        pdf_output_path = os.path.join(self.output_folder, f"{pdf_name}.pdf")
+        # Apply anti-overwrite logic here
+        pdf_output_path = self._get_unique_pdf_path(pdf_name)
+
         try:
             pdf.output(pdf_output_path)
         except Exception as e:
-            print(f"⚠️ Fehler beim Speichern der PDF '{pdf_name}': {e}")
-            return
+            print(f"Error saving PDF '{pdf_name}': {e}")
+            return False
 
-        # Sichere Lösch-Logik
+        # Delete processed images
         if self.delete_source:
             for img_path in processed_images:
                 try:
                     os.remove(img_path)
                 except Exception:
                     pass
-            if subfolder_path != self.input_folder:
-                try:
-                    os.rmdir(subfolder_path)
-                except OSError:
-                    pass
+
+        return True
 
 
 class PDFConverterApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Image to PDF Converter")
-        self.root.geometry("500x450")
+        self.root.geometry("520x450")
         self.root.resizable(False, False)
 
         try:
@@ -223,12 +320,14 @@ class PDFConverterApp:
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
-        self.folder_paths = []
+        self.input_paths = []
         self.config_path = os.path.join(
             os.path.expanduser("~"), ".img2pdf_converter_cfg.json"
         )
 
-        self.out_dir_var = tk.StringVar(value=os.path.join(os.getcwd(), "pdf_output"))
+        self.out_dir_var = tk.StringVar(
+            value=os.path.abspath(os.path.join(os.getcwd(), "pdf_output"))
+        )
         self.delete_source_var = tk.BooleanVar(value=False)
 
         self.load_settings()
@@ -237,15 +336,21 @@ class PDFConverterApp:
         top_frame = tk.Frame(root)
         top_frame.pack(fill=tk.X, padx=20, pady=(15, 5))
 
-        self.add_btn = tk.Button(
+        self.add_folder_btn = tk.Button(
             top_frame, text="Add Folder", command=self.add_folders, width=10
         )
-        self.add_btn.pack(side=tk.LEFT)
-        ToolTip(self.add_btn, "Select one or more input folders from your PC.")
+        self.add_folder_btn.pack(side=tk.LEFT, padx=(0, 5))
+        ToolTip(self.add_folder_btn, "Select one or more input folders from your PC.")
 
-        tk.Label(
-            top_frame, text="Selected Input Folders:", font=("Arial", 9, "bold")
-        ).pack(side=tk.LEFT, padx=20)
+        self.add_zip_btn = tk.Button(
+            top_frame, text="Add ZIP", command=self.add_zips, width=10
+        )
+        self.add_zip_btn.pack(side=tk.LEFT)
+        ToolTip(self.add_zip_btn, "Select one or more .zip files directly.")
+
+        tk.Label(top_frame, text="Selected Inputs:", font=("Arial", 9, "bold")).pack(
+            side=tk.LEFT, padx=15
+        )
 
         # --- Listbox Frame ---
         list_frame = tk.Frame(root)
@@ -264,12 +369,12 @@ class PDFConverterApp:
         scrollbar.config(command=self.listbox.yview)
 
         self.listbox.drop_target_register(DND_FILES)  # type: ignore
-        self.listbox.dnd_bind("<<Drop>>", self.drop_folders)  # type: ignore
+        self.listbox.dnd_bind("<<Drop>>", self.drop_items)  # type: ignore
 
         self.listbox.bind("<Delete>", self.remove_selected)
         ToolTip(
             self.listbox,
-            "Drag & Drop your Input Folders here!\nMultiple selection enabled.\nPress 'Del' or right-click to remove folders.",
+            "Drag & Drop Folders or .zip files here!\nMultiple selection enabled.\nPress 'Del' or right-click to remove items.",
         )
 
         self.context_menu = Menu(self.root, tearoff=0)
@@ -303,20 +408,20 @@ class PDFConverterApp:
 
         self.chk_delete = tk.Checkbutton(
             settings_frame,
-            text="Delete source files (ZIPs/Images) after conversion",
+            text="Delete source files after conversion",
             variable=self.delete_source_var,
         )
         self.chk_delete.grid(row=1, column=0, columnspan=2, sticky="w", pady=2)
         ToolTip(
             self.chk_delete,
-            "If checked, successfully processed images and ZIP archives\nwill be permanently deleted from the input folders.",
+            "If checked, successfully processed images, ZIPs, and their\ncontaining empty folders will be permanently deleted.",
         )
 
         # --- Convert Button ---
         self.convert_btn = tk.Button(
             root,
             text="Convert to PDF",
-            command=self.process_folders,
+            command=self.process_items,
             bg="#4CAF50",
             fg="white",
             font=("Arial", 10, "bold"),
@@ -325,7 +430,8 @@ class PDFConverterApp:
         )
         self.convert_btn.pack(pady=(5, 15))
         ToolTip(
-            self.convert_btn, "Starts processing all folders currently in the list."
+            self.convert_btn,
+            "Starts processing all folders and ZIPs currently in the list.",
         )
 
     def load_settings(self):
@@ -355,19 +461,57 @@ class PDFConverterApp:
         self.save_settings()
         self.root.destroy()
 
+    def _add_paths_if_valid(self, paths):
+        """Checks for overlaps and adds paths to the list."""
+        skipped_count = 0
+        for new_path in paths:
+            new_path_abs = os.path.abspath(new_path)
+            overlap = False
+
+            for existing in self.input_paths:
+                existing_abs = os.path.abspath(existing)
+                try:
+                    # os.path.commonpath finds the common parent folder
+                    common = os.path.commonpath([new_path_abs, existing_abs])
+                    # If the common path matches exactly one of the two, one is inside the other (or they are the same)
+                    if common == existing_abs or common == new_path_abs:
+                        overlap = True
+                        break
+                except ValueError:
+                    # Happens when paths are on different drives (e.g., C:\ and D:\)
+                    pass
+
+            if not overlap:
+                self.input_paths.append(new_path)
+                self.listbox.insert(tk.END, new_path)
+            else:
+                skipped_count += 1
+
+        if skipped_count > 0:
+            messagebox.showwarning(
+                "Overlap Detected",
+                f"{skipped_count} item(s) were skipped because they are already in the list or overlap with existing folders.",
+            )
+
     def add_folders(self):
         folder = filedialog.askdirectory(title="Select Input Folder")
-        if folder and folder not in self.folder_paths:
-            self.folder_paths.append(folder)
-            self.listbox.insert(tk.END, folder)
+        if folder:
+            self._add_paths_if_valid([folder])
 
-    def drop_folders(self, event):
-        files = self.root.tk.splitlist(event.data)
-        for f in files:
-            # Check if dropped item is a directory
-            if os.path.isdir(f) and f not in self.folder_paths:
-                self.folder_paths.append(f)
-                self.listbox.insert(tk.END, f)
+    def add_zips(self):
+        files = filedialog.askopenfilenames(
+            title="Select ZIP files", filetypes=[("ZIP files", "*.zip")]
+        )
+        if files:
+            self._add_paths_if_valid(files)
+
+    def drop_items(self, event):
+        items = self.root.tk.splitlist(event.data)
+        valid_items = [
+            f for f in items if os.path.isdir(f) or f.lower().endswith(".zip")
+        ]
+        if valid_items:
+            self._add_paths_if_valid(valid_items)
 
     def remove_selected(self, event=None):
         selection = self.listbox.curselection()
@@ -375,7 +519,7 @@ class PDFConverterApp:
             return
         for i in reversed(selection):
             self.listbox.delete(i)
-            del self.folder_paths[i]
+            del self.input_paths[i]
 
     def show_context_menu(self, event):
         try:
@@ -393,16 +537,17 @@ class PDFConverterApp:
             title="Select Output Folder", initialdir=self.out_dir_var.get()
         )
         if folder:
-            self.out_dir_var.set(folder)
+            self.out_dir_var.set(os.path.abspath(folder))
 
-    def process_folders(self):
-        if not self.folder_paths:
+    def process_items(self):
+        if not self.input_paths:
             messagebox.showwarning(
-                "No Folders", "Please add at least one input folder to the list."
+                "No Items",
+                "Please add at least one input folder or ZIP file to the list.",
             )
             return
 
-        out_dir = self.out_dir_var.get()
+        out_dir = os.path.abspath(self.out_dir_var.get())
         if not os.path.exists(out_dir):
             try:
                 os.makedirs(out_dir)
@@ -416,30 +561,40 @@ class PDFConverterApp:
         delete_src = self.delete_source_var.get()
 
         total_processed_pdfs = 0
-        total_folders = len(self.folder_paths)
+        total_items = len(self.input_paths)
 
-        # Disable button during processing to prevent double clicks
         self.convert_btn.config(state=tk.DISABLED, text="Processing...")
         self.root.update()
 
         try:
-            for folder_path in self.folder_paths:
+            for item_path in self.input_paths:
                 converter = PDFConverter(
-                    input_folder=folder_path,
+                    input_path=item_path,
                     output_folder=out_dir,
                     delete_source=delete_src,
                 )
-                pdfs_created = converter.convert_images_to_pdf()
+                pdfs_created = converter.convert()
                 total_processed_pdfs += pdfs_created
+
+            # Dynamic completion message
+            status_msg = (
+                "Original files were deleted."
+                if delete_src
+                else "Original files were KEPT intact."
+            )
 
             messagebox.showinfo(
                 "Success",
-                f"Done!\n\nScanned {total_folders} main folder(s).\nCreated {total_processed_pdfs} .pdf files in:\n{out_dir}",
+                f"Done!\n\nProcessed {total_items} item(s).\nCreated {total_processed_pdfs} .pdf files in:\n{out_dir}\n\nNote: {status_msg}",
             )
+
+            # Clear the list after success (optional, but user-friendly)
+            self.listbox.delete(0, tk.END)
+            self.input_paths.clear()
+
         except Exception as e:
             messagebox.showerror("Error", f"An unexpected error occurred:\n{e}")
         finally:
-            # Restore button
             self.convert_btn.config(state=tk.NORMAL, text="Convert to PDF")
 
 
