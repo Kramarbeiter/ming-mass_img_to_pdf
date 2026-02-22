@@ -1,7 +1,0 @@
-skript scans all pictures in subfolders of "img_to_pdf" (1.) and converts them into a single pdf per subfolder. pdf name will be the same as name of containing subfolder. also works if folders are zipped. source data will be deleted after conversion is complete.
-
-1. create folder "img_to_pdf" in downloads an copy all zips and folders containing pictures to be converted in said folder
-2. copy and paste mass_img_tp_pdf.py in downloads (if using for first time, open file and set correct path name at the end)
-3. run cmd
-4. type "cd downloads"
-5. type "py mass_img_to_pdf.py"
