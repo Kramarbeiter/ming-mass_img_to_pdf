@@ -1,0 +1,7 @@
+*.spec
+
+*.png
+
+/build
+
+/dist
